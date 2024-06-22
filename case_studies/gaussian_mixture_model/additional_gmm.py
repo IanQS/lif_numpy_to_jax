@@ -7,6 +7,17 @@ import jax
 import numpy as np  
 np.random.seed(123)
 
+from collections import namedtuple
+
+GMMState = namedtuple(
+    "GMMState",
+    [
+        "data",
+        "responsibilities", "mus", "sigmas", "cls_probs", "ll_arr",
+        "guess_num_classes"
+    ]
+)
+
 from sklearn.datasets import make_blobs
 # We use a jit to speed up the function. a `jit` + `vmap` should achieve the same performance
 @jax.jit
@@ -129,8 +140,37 @@ def m_step(X, mus, responsibilities):
 
     return mus, sigmas, jnp.expand_dims(cls_prior, -1)
 
-def gmm_single_iteration():
-    pass
+def gmm_single_iteration(state: GMMState):
+    data = state.data
+    mus = state.mus
+    sigmas = state.sigmas
+    cls_probs = state.cls_probs
+    guess_num_classes = state.guess_num_classes
+    responsibilities = e_step(data, mus, sigmas, cls_probs)
+
+    # m-step
+    mus, sigmas, cls_probs = m_step(data, mus, responsibilities)
+    # Recalculate the log-likelihood
+    ll_curr = log_likelihood(data, mus, sigmas, cls_probs, guess_num_classes)
+    new_ll_arr = state.ll_arr
+    new_ll_arr.append()
+    return GMMState(
+        data = state.data,
+        responsibilities=responsibilities,
+        mus=mus,
+        sigmas=sigmas,
+        cls_probs=cls_probs,
+        ll_arr=state.ll_arr,
+        guess_num_classes=guess_num_classes
+    )
+    return (responsibilities, mus, sigmas, cls_probs, ll_curr)
+
+def gmm_not_converged(state: GMMState):
+    TOL = 0.00001
+    if jnp.abs(state.ll_arr[-1] - state.ll_arr[-2]) < TOL:
+        return False
+    return True
+
 
 def EM_GMM(
         data: np.ndarray,
@@ -141,27 +181,28 @@ def EM_GMM(
         verbose=False
 
 ):
-    counter = 0
-    ll_container = []
-    TOL = 0.00001
-    ll_container.append(jnp.inf)
+    responsibilities = e_step(data, mus, sigmas, cls_probs)
+    ll_container = [jnp.inf]
+    state = GMMState(responsibilities,
+                     mus=mus,
+                     sigmas=sigmas,
+                     cls_probs=cls_probs,
+                     ll_arr=ll_container
+                     )
 
+    jax.lax.while_loop(
+        gmm_not_converged,
+        body_fun=gmm_single_iteration,
+        init_val=state
+    )
     while True:  # Run until converges
         # e-step
-        responsibilities = e_step(data, mus, sigmas, cls_probs)
 
-        # m-step
-        mus, sigmas, cls_probs = m_step(data, mus, responsibilities)
-        # Recalculate the log-likelihood
-        ll_curr = log_likelihood(data, mus, sigmas, cls_probs, guess_num_classes)
-
+        ll_container.append(ll_curr)
         if jnp.abs(ll_container[-1] - ll_curr) < TOL:
             jax.debug.print("Converged to within {TOL} after: {counter} iterations", TOL=TOL, counter=counter)
             break
-
-        ll_container.append(ll_curr)
         if verbose:
-            jax.debug.print("Converged to within {TOL} after: {counter} iterations", TOL=TOL, counter=counter)
             jax.debug.print("Data Log-Likelihood at iteration: {counter} = {ll_curr}", counter=counter, ll_curr=ll_curr)
         counter += 1
 
